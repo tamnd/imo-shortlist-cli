@@ -1,4 +1,4 @@
-// Command imo-shortlist is a single-binary command line for imo-shortlist.
+// Command imoslx is a single-binary command line for IMO Shortlist PDFs.
 package main
 
 import (

@@ -35,7 +35,7 @@ func (v *versionCmd) run(_ context.Context, _ []string) error {
 		_, _ = fmt.Fprintln(os.Stdout, Version)
 		return nil
 	}
-	_, _ = fmt.Fprintf(os.Stdout, "imo-shortlist %s (commit %s, built %s, %s/%s, %s)\n",
+	_, _ = fmt.Fprintf(os.Stdout, "imoslx %s (commit %s, built %s, %s/%s, %s)\n",
 		Version, Commit, Date, runtime.GOOS, runtime.GOARCH, runtime.Version())
 	return nil
 }
