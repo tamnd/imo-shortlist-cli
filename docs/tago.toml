@@ -1,0 +1,10 @@
+title       = "imo-shortlist"
+baseURL     = "https://imo-shortlist-cli.tamnd.com/"
+description = "A command line for imo-shortlist."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/imo-shortlist-cli"
