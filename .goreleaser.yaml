@@ -16,9 +16,9 @@ before:
     - go mod download
 
 builds:
-  - id: imoslx
-    binary: imoslx
-    main: ./cmd/imoslx
+  - id: imoshortlist
+    binary: imoshortlist
+    main: ./cmd/imoshortlist
     env:
       - CGO_ENABLED=0
     flags:
