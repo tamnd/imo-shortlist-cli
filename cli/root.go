@@ -1,4 +1,4 @@
-// Package cli assembles the imoslx command tree from the imoshortlist
+// Package cli assembles the imoshortlist command tree from the imoshortlist
 // domain on top of the any-cli/kit framework.
 package cli
 

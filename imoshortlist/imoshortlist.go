@@ -1,4 +1,4 @@
-// Package imoshortlist is the library behind the imoslx command: the HTTP
+// Package imoshortlist is the library behind the imoshortlist command: the HTTP
 // client, request shaping, and the typed data models for IMO Shortlist PDFs.
 //
 // The client probes PDF availability with HEAD requests at
@@ -11,13 +11,33 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Host is the IMO official site host.
 const Host = "www.imo-official.org"
+
+// codeRE matches a problem code like "A3", "N1", "G6", "C2" (case-insensitive).
+var codeRE = regexp.MustCompile(`(?i)^([ACGN])(\d+)$`)
+
+// categoryOf maps the letter prefix to a full category name.
+var categoryOf = map[string]string{
+	"A": "Algebra",
+	"C": "Combinatorics",
+	"G": "Geometry",
+	"N": "Number Theory",
+}
+
+// problemsPerCategory is the number of problems per category per year.
+// The actual count varies; 7 is a safe upper bound for recent years.
+const problemsPerCategory = 7
+
+// categories lists the four shortlist categories in the standard order.
+var categories = []string{"A", "C", "G", "N"}
 
 // Config holds constructor parameters for the Client.
 type Config struct {
@@ -34,12 +54,12 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		BaseURL:   "https://www.imo-official.org",
-		UserAgent: "Mozilla/5.0 (compatible; imo-shortlist-cli/dev; +https://github.com/tamnd/imo-shortlist-cli)",
+		UserAgent: "Mozilla/5.0 (compatible; imoshortlist-cli/dev; +https://github.com/tamnd/imo-shortlist-cli)",
 		Rate:      200 * time.Millisecond,
 		Timeout:   30 * time.Second,
 		Retries:   3,
 		MinYear:   2006,
-		MaxYear:   2024,
+		MaxYear:   2025,
 	}
 }
 
@@ -59,14 +79,19 @@ func NewClient(cfg Config) *Client {
 	}
 }
 
-// Shortlists probes each year from MaxYear down to MinYear with a HEAD request
+// pdfURL returns the full URL for the shortlist PDF for the given year.
+func (c *Client) pdfURL(year int) string {
+	return fmt.Sprintf("%s/problems/IMO%dSL.pdf", c.cfg.BaseURL, year)
+}
+
+// List probes each year from MaxYear down to MinYear with a HEAD request
 // and returns those that return HTTP 200, newest first.
 // If limit > 0, at most limit items are returned.
-func (c *Client) Shortlists(ctx context.Context, limit int) ([]Shortlist, error) {
-	var result []Shortlist
+func (c *Client) List(ctx context.Context, limit int) ([]ShortlistEntry, error) {
+	var result []ShortlistEntry
 	rank := 0
 	for year := c.cfg.MaxYear; year >= c.cfg.MinYear; year-- {
-		url := fmt.Sprintf("%s/problems/IMO%dSL.pdf", c.cfg.BaseURL, year)
+		url := c.pdfURL(year)
 		status, size, err := c.head(ctx, url)
 		if err != nil {
 			return nil, err
@@ -75,10 +100,10 @@ func (c *Client) Shortlists(ctx context.Context, limit int) ([]Shortlist, error)
 			continue
 		}
 		rank++
-		result = append(result, Shortlist{
+		result = append(result, ShortlistEntry{
 			Rank:      rank,
 			Year:      year,
-			URL:       url,
+			PDFURL:    url,
 			SizeBytes: size,
 		})
 		if limit > 0 && rank >= limit {
@@ -86,6 +111,124 @@ func (c *Client) Shortlists(ctx context.Context, limit int) ([]Shortlist, error)
 		}
 	}
 	return result, nil
+}
+
+// Shortlists is an alias for List kept for backward compatibility with v0.1 tests.
+func (c *Client) Shortlists(ctx context.Context, limit int) ([]ShortlistEntry, error) {
+	return c.List(ctx, limit)
+}
+
+// ShortlistForYear probes the PDF for a single year.
+// Returns (entry, true, nil) if found, (zero, false, nil) if not found,
+// or (zero, false, err) on network error.
+func (c *Client) ShortlistForYear(ctx context.Context, year int) (ShortlistEntry, bool, error) {
+	url := c.pdfURL(year)
+	status, size, err := c.head(ctx, url)
+	if err != nil {
+		return ShortlistEntry{}, false, err
+	}
+	if status != http.StatusOK {
+		return ShortlistEntry{}, false, nil
+	}
+	return ShortlistEntry{Rank: 1, Year: year, PDFURL: url, SizeBytes: size}, true, nil
+}
+
+// Problem returns a single problem by year and code (e.g. "A3", "N1").
+// It first checks that the shortlist PDF for that year is available, then
+// derives the Problem from the validated year and code.
+func (c *Client) Problem(ctx context.Context, year int, code string) (Problem, error) {
+	m := codeRE.FindStringSubmatch(code)
+	if m == nil {
+		return Problem{}, fmt.Errorf("invalid problem code %q: use letter (A/C/G/N) followed by a number, e.g. A3", code)
+	}
+	letter := strings.ToUpper(m[1])
+	cat, ok := categoryOf[letter]
+	if !ok {
+		return Problem{}, fmt.Errorf("unknown category letter %q", letter)
+	}
+
+	url := c.pdfURL(year)
+	status, _, err := c.head(ctx, url)
+	if err != nil {
+		return Problem{}, err
+	}
+	if status != http.StatusOK {
+		return Problem{}, fmt.Errorf("no shortlist PDF found for year %d", year)
+	}
+
+	return Problem{
+		Year:     year,
+		Code:     strings.ToUpper(code),
+		Category: cat,
+		PDFURL:   url,
+	}, nil
+}
+
+// Export returns all problems for a given year (all 4 categories × problemsPerCategory).
+// If year <= 0, it exports problems for all available years (MaxYear down to MinYear).
+func (c *Client) Export(ctx context.Context, year int) ([]Problem, error) {
+	var years []int
+	if year > 0 {
+		// Check a single year.
+		url := c.pdfURL(year)
+		status, _, err := c.head(ctx, url)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("no shortlist PDF found for year %d", year)
+		}
+		years = []int{year}
+	} else {
+		// Probe all years.
+		entries, err := c.List(ctx, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			years = append(years, e.Year)
+		}
+	}
+
+	var problems []Problem
+	for _, y := range years {
+		url := c.pdfURL(y)
+		for _, cat := range categories {
+			for n := 1; n <= problemsPerCategory; n++ {
+				code := fmt.Sprintf("%s%d", cat, n)
+				problems = append(problems, Problem{
+					Year:     y,
+					Code:     code,
+					Category: categoryOf[cat],
+					PDFURL:   url,
+				})
+			}
+		}
+	}
+	return problems, nil
+}
+
+// Info probes all years and returns aggregate statistics.
+func (c *Client) Info(ctx context.Context) (Info, error) {
+	total := 0
+	avail := 0
+	for year := c.cfg.MinYear; year <= c.cfg.MaxYear; year++ {
+		total++
+		url := c.pdfURL(year)
+		status, _, err := c.head(ctx, url)
+		if err != nil {
+			return Info{}, err
+		}
+		if status == http.StatusOK {
+			avail++
+		}
+	}
+	return Info{
+		MinYear:    c.cfg.MinYear,
+		MaxYear:    c.cfg.MaxYear,
+		YearsTotal: total,
+		PDFsAvail:  avail,
+	}, nil
 }
 
 // head issues a HEAD request with retry logic.
@@ -157,5 +300,9 @@ func (c *Client) pace() {
 }
 
 func backoff(attempt int) time.Duration {
-	return min(time.Duration(attempt)*500*time.Millisecond, 5*time.Second)
+	d := time.Duration(attempt) * 500 * time.Millisecond
+	if d > 5*time.Second {
+		return 5 * time.Second
+	}
+	return d
 }
